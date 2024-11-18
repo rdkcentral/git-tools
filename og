@@ -1,0 +1,543 @@
+#!/usr/bin/env bash
+
+SCRIPT_EXEC="$(realpath $0)"
+MY_DIR="$(dirname $SCRIPT_EXEC)"
+
+#set -x
+
+RED="\e[0;31m"
+YELLOW="\e[1;33m"
+GREEN="\e[0;32m"
+ORANGE="\e[0;31m"
+BLUE="\e[0;34m"
+CYAN="\e[36m"
+MAGENTA="\e[0;35m"
+BLACK="\e[0;30m"
+COLOROFF="\e[39m"
+RED_BOLD="\e[1;31m"
+YELLOW_BOLD="\e[1;33m"
+GREEN_BOLD="\e[1;32m"
+BLUE_BOLD="\e[1;34m"
+MAGENTA_BOLD="\e[1;35m"
+BLACK_BOLD="\e[1;30m"
+COLOUR_OFF="\033[0m"
+
+HELP_COLOUR=${CYAN}
+
+COMMAND=""
+LINE_SKIP=""
+PATTERN=""
+SEARCH=""
+NUM_LINES=""
+result=0
+DEBUG=0
+VERBOSE_FLAG=0
+IS_GERRIT=0
+IS_GITHUB=0
+
+function display_latest_version()
+{
+    INFO "${HELP_COLOUR}Object Control Script: [${YELLOW}1.0.0${GREEN}] - Build Date: ${YELLOW}2022-08-11${NOCOLOR}"
+}
+
+function DEBUG()
+{
+    if [ "${DEBUG}" != "0" ]; then
+        echo -e "${GREEN}DEBUG: ${CYAN}$@${COLOUR_OFF}"
+    fi
+}
+
+function ECHO()
+{
+	echo -e "$@"
+}
+
+function ERROR()
+{
+    echo -e "${RED_BOLD}ERROR: ${RED}$@${COLOUR_OFF}"
+}
+
+function INFO()
+{
+    echo -e "${GREEN}$@${COLOUR_OFF}"
+}
+
+function VERBOSE()
+{
+    if [ ${VERBOSE_FLAG} == 1 ]; then
+        echo -e "${MAGENTA_BOLD}$@${COLOUR_OFF}"
+    fi
+}
+
+function find_repos()
+{
+    DEBUG find_repos
+    #input=$(find "${PWD}" -type d -name '.git' -exec dirname '{}' \;|sort)
+    #input2=$(find "${PWD}" -type l -name '.git' -exec dirname '{}' \;|sort)
+    REPOS=""
+    readarray -t REPOSD < <(find "${PWD}" -type d -name '.git' -exec dirname '{}' \;|sort)
+    readarray -t REPOSL < <(find "${PWD}" -type l -name '.git' -exec dirname '{}' \;|sort)
+
+    REPOS=($(echo ${REPOSD[*]}) $(echo ${REPOSL[*]}))
+}
+
+function show_branches()
+{
+    local color=auto
+    if [[ -t 1 ]];then
+        color=always
+    fi
+
+    if [ "${COMMAND}" == "current_branch" ]; then
+        if [ "${VERBOSE_FLAG}" == "1" ]; then
+            git log -1 --oneline
+        else
+            git branch --show-current --color=auto
+        fi
+    else
+        git branch \
+            --all \
+            --color="$color" \
+            --sort=authordate \
+            --format="%(color:blue)%(authordate:relative);%(color:red)%(authorname);%(color:white)%(color:bold)%(refname:short)" \
+            "$@" \
+            | column -s ";" -t
+    fi
+}
+
+function usage()
+{
+    INFO
+    INFO "og - Operate on .git directory"
+    INFO "   - Command line tool to run recursive on the directory containing .git"
+    INFO
+    INFO " ${YELLOW}og <command> <switches> <params>${COLOUR_OFF}"
+    INFO
+    INFO ${HELP_COLOUR}"Example:"${COLOUR_OFF}
+    INFO "    ${YELLOW}og .${COLOUR_OFF} - Will display all the .git repo directories found from current directory below"
+    INFO
+    INFO "Commands:"
+	INFO " ${HELP_COLOUR}alldirectories|-a|--a${COLOUR_OFF}    -	All directories (don't search for .git)."
+	INFO " ${HELP_COLOUR}current_branch|-cb|--cb${COLOUR_OFF}  -	Display Oneline branch information. Adding -v extends output"
+	INFO " ${HELP_COLOUR}branch|-b|--b${COLOUR_OFF}            -	Display branch information for the current directory."
+	INFO " ${HELP_COLOUR}branches|-B|--B${COLOUR_OFF}          -	Display branch inforamtion all the directories."
+	INFO " ${HELP_COLOUR}status|st|-st|--st${COLOUR_OFF}       -	Perform git status on the directories."
+	INFO " ${HELP_COLOUR}cmd|-c|--c${COLOUR_OFF}               -	Run a command."
+	INFO " ${HELP_COLOUR}url|-u|--u${COLOUR_OFF}               -	Get the url from the input directory specified, using the git remote."
+	INFO "                          -	optional: <path_to_file> - if specified will get create the uplink clickable url from the input directory specified."
+	INFO "                          -	non path - will list every repo and print it's uplink clickable link, (assumes code is pushed)"
+	INFO " ${HELP_COLOUR}remote|-r|--r|.${COLOUR_OFF}          -	Display the remotes."
+    if [ -f ${MY_DIR}/review.sh ]; then
+    	INFO " ${HELP_COLOUR}review|-rv|--rv|.${COLOUR_OFF}        -	Run review on each git repo, if an uplink is present"
+    fi
+	INFO " ${HELP_COLOUR}help|--help|-h|--h|-help${COLOUR_OFF} -	Display this menu."
+	ECHO ""
+        INFO "Optional switches:"
+        INFO " ${HELP_COLOUR}--search|-s|--s${COLOUR_OFF}     -       add search criteria"
+        INFO " ${HELP_COLOUR}--line|-l|--l${COLOUR_OFF}       -       add line echo spacing between each search"
+        INFO " ${HELP_COLOUR}--directory|-d|--d${COLOUR_OFF}  -       restrict the directory search to the given pattern"
+        INFO " ${HELP_COLOUR}--num|-n|--n${COLOUR_OFF}        -       specify the number of lines to display"
+	ECHO ""
+}
+
+function decode_single_param()
+{
+    extra_shift=0
+    #INFO "decode_single_param: [${1}]"
+    case "${1}" in
+        "--search"|"-s"|"--s")
+            SEARCH="${2}"
+            extra_shift=1
+            DEBUG Search:[${SEARCH}]
+            ;;
+
+        "--directory"|"-d"|"--d")
+            DIRECTORY_PATTERN="${2}"
+            extra_shift=1
+            DEBUG Pattern:[${DIRECTORY_PATTERN}]
+            ;;
+
+        "--line"|"-l"|"--l")
+            DEBUG line_skip:${2}
+            LINE_SKIP="true"
+            echo ""
+            ;;
+
+        "--n"|"-n")
+            DEBUG number of lines:${2}
+            NUM_LINES=${2}
+            extra_shift=1
+            ;;
+
+        "--v"|"-v")
+            DEBUG verbose
+            VERBOSE_FLAG=1
+            ;;
+
+        "remote"|"--r"|"-r")
+            COMMAND="remote"
+            DEBUG Command:[${COMMAND}]
+            ;;
+
+        "branch"|"-b"|"--b"|"-branch"|"--branch")
+            COMMAND="branch"
+            DEBUG Command:[${COMMAND}]
+            ;;
+
+        "current_branch"|"-cb"|"--cb"|"-current_branch"|"--current_branch")
+            COMMAND="current_branch"
+            DEBUG Command:[${COMMAND}]
+            ;;
+
+        "branches"|"-B"|"--B"|"--branches"|"-branches")
+            COMMAND="branches"
+            DEBUG Command:[${COMMAND}]
+            ;;
+
+        "review"|"-rv"|"--rv")
+            if [ -f ${MY_DIR}/review.sh ]; then
+                COMMAND="review"
+                DEBUG Command:[${COMMAND}]
+            else
+                usage
+                exit 0
+            fi
+            ;;
+
+        "cmd"|"-c"|"--c"|"."|"--cmd"|"-cmd")
+            COMMAND="cmd"
+            PARAMS="${2}"
+            extra_shift=1
+            DEBUG Command:[${COMMAND}]":"[PARAMS:${2}]
+            ;;
+
+        "st"|"-st"|"--st"|"status")
+            COMMAND="status"
+            DEBUG Command:[${COMMAND}]
+            ;;
+
+        "-u"|"--u"|"url")
+            DEBUG Switch:[${1}]
+            COMMAND="url"
+            if [ "${2}" != "" ]; then
+                VERBOSE "url find [${2}]"
+                output_repo_url_link ${2}
+                extra_shift=1
+                exit 0
+            fi
+            ;;
+
+        "help"|"-h"|"--h"|"--help"|"-help")
+            DEBUG help
+            usage
+            exit 0
+            ;;
+
+        *)
+            ERROR "Unknown Command: [${1}]"
+            usage
+            exit 1
+            ;;
+    esac
+}
+
+function decode_params()
+{
+    extra_shift=0
+    while [ $# -ne 0 ]
+        do
+            decode_single_param "$@"
+            #echo extra_shift=$extra_shift
+            for (( c=0; c<=extra_shift; c++ ))
+                do
+                    shift
+                done
+        done
+}
+
+function get_filename_without_path() 
+{
+  local path_plus_filename="$1"
+
+  # Split the path+filename into a list of strings using the path separator character.
+  local filename_list=(${path_plus_filename//\// })
+
+  # If the last element of the list is empty, then the path+filename is a path alone.
+  # In this case, return the empty string.
+  if [[ -z "${filename_list[-1]}" ]]; then
+    echo ""
+    return
+  fi
+
+  # Otherwise, the last element of the list is the filename.
+  # Test if the filename is a directory or file.
+  if [[ -d "$path_plus_filename" ]]; then
+    echo ""
+    return
+  else
+    echo "${filename_list[-1]}"
+  fi
+}
+
+function determine_server_type
+{
+    IS_GERRIT=""
+    IS_GITHUB=""
+
+    # Determine gerrit / github / gitlab
+    IS_GITHUB=$(echo ${remote}|grep "github")
+    if [ "${IS_GITHUB}" != "" ]; then
+        echo "github"
+        return
+    fi
+
+    # Otherwise assume gerrit
+    IS_GERRIT=1
+}
+
+function create_url()
+{
+    url_sub_prefix=""
+
+    remote=$(git remote -vv | head -n1 | awk -F ' ' '{print $2}')
+    determine_server_type
+    is_http=$(echo $remote | grep "http")
+    if [ $? -eq 0 ]; then
+        # extract the https url, cut off .git if required
+        url=$( echo ${remote} | sed 's/\.git//g' | sed 's/\https:\/\///g' )
+        if [ "${IS_GERRIT}" != "" ]; then
+            # We need to strip away the server add in the prefix, then append as normal
+            url_sub_prefix="plugins/gitiles/"
+            url="https://"${url_sub_prefix}${url}
+        else
+            # Re-add the url requirements
+            url="https://"${url}
+        fi
+    else
+        # extract the ssh://git@ or the git@
+        url=$(echo ${remote}| awk -F '@' '{print $2}' | awk -F ':' '{print $1}' | sed 's/\.git//g')
+        sub=$(echo ${remote}| awk -F '@' '{print $2}' | awk -F ':' '{print $2}' | awk -F '.git' '{print $1}')
+        if [ "${url}" == "" ]; then
+            # check for ssh://url:port/sub example case
+            url=$(echo ${remote}| awk -F 'ssh://' '{print $2}' | awk -F '/' '{print $1}' | awk -F ':' '{print $1}')
+            sub=$(echo ${remote}| awk -F 'ssh://' '{print $2}' | cut -d '/' -f2-)
+            if [ "${url}" == "" ]; then
+                # check for url:port/sub example case
+                url=$(echo ${remote}| awk -F '/' '{print $1}' | awk -F ':' '{print $1}')
+                sub=$(echo ${remote}| cut -d '/' -f2-)
+            fi
+        fi
+        # ssh prefix, if we're in gerrit mode we have a url_prefix
+        if [ "${IS_GERRIT}" != "" ]; then
+            url_sub_prefix="plugins/gitiles/"
+        fi
+        if [ "${sub}" == "" ]; then
+            url="https://"${url}
+        else
+            url="https://"${url}/${url_sub_prefix}${sub}
+        fi
+    fi
+
+    relative_path=$(git rev-parse --show-prefix ${path}|head -n1)
+    relative_filename=$(get_filename_without_path $path)
+
+    if [ "${relative_filename}" != "" ]; then
+        # If the filename mode, then we must include blob in the url in github case
+        github_dir_prefix="blob/"
+        gitlab_dir_prefix="-/blob/"
+        gerrit_dir_prefix="+/"
+    else
+        # branch mode
+        github_dir_prefix="tree/"
+        gitlab_dir_prefix="-/tree/"
+        gerrit_dir_prefix="+/"
+    fi
+
+    if [ "${IS_GERRIT}" != "" ]; then
+        # We're in gerrit mode
+        dir_prefix=${gerrit_dir_prefix}
+    else
+        # We're either in github or gitlab mode
+        if [ "${IS_GITHUB}" != "" ]; then
+            dir_prefix=${github_dir_prefix}
+        else
+            dir_prefix=${gitlab_dir_prefix}
+        fi
+    fi
+
+    # Create a url for the directory path
+    git_branch_name=$(git symbolic-ref --short HEAD 2>&1 )
+    if [ $? -eq 0 ]; then
+        # e.g. -> https://github.com/rdk-e/meta-rdk/tree/STBT-38005/classes
+        git_filename=${git_branch_name}/${relative_path}
+        git_blob=${git_branch_name}
+    else
+        git_sha=$(git describe --exact-match --tags 2>&1)
+        if [ $? -ne 0 ]; then 
+            git_sha=$(git rev-parse HEAD)
+        fi
+        # We're not on a branch get the SHA
+        # e.g. -> https://github.com/rdk-e/meta-rdk/tree/0a933bfd3726d36da95eaa582c99a6081e35c144
+        git_filename=${git_sha}/${relative_path}
+        git_blob=${git_sha}
+    fi
+
+    # Extend the path with the filename if required
+    git_filename=${dir_prefix}${git_filename}${relative_filename}
+    git_filename=$(echo ${git_filename} | sed 's/\%/\%25/g' )
+
+    echo -en ${YELLOW}${remote} ${CYAN}"("${git_blob}")${YELLOW}  ->  "
+    echo ${url}/${git_filename}
+    echo -e ${COLOUR_OFF}
+}
+
+function get_path_without_filename() 
+{
+    local path="$1"
+
+    # Check if the path is already a path without a filename.
+    if [ -d "$path" ]; then
+        # If the path is a directory and it is empty, return the path.
+        dirpath=$(realpath "$path")
+        echo "$dirpath"
+        return 0
+    fi
+
+    # Remove the filename from the path.
+    local dirpath=$(dirname "$path")
+
+    dirpath=$(realpath "$dirpath")
+
+    # Return the path without the filename.
+    echo "$dirpath"
+}
+
+#/**
+#* @brief - convert the input git repo remote type string to a url 
+#* @param $1 - url
+#*/
+function output_repo_url_link()
+{
+    local url
+    local remote
+    local path=$(realpath $1)
+    local filename
+
+    dir=$(get_path_without_filename ${path})
+    DEBUG DIR: $dir
+    pushd ${dir} > /dev/null 2>&1
+    if [ $? == 0 ]; then
+        DEBUG $PWD
+        # Get the relative path of the file / directory requested from git
+        status=$(git status)
+        if [ $? == 0 ]; then
+            create_url
+        else
+            ERROR ${RED}[${dir}] is not a git repo${COLOUR_OFF}
+        fi
+    else
+        ERROR "Folder ["${1}"] not found"
+    fi
+    popd > /dev/null 2>&1
+}
+
+function perform_command()
+{
+    repo="${1}"
+    pushd "${repo}" > /dev/null 2>&1
+
+    case "${COMMAND}" in
+
+        "cmd")
+            DEBUG "cmd"
+            if [[ -z "${NUM_LINES}" ]]; then
+                VERBOSE "Running Command:[${PARAMS}]"
+                eval "${PARAMS}"
+            else
+                eval "${PARAMS}|head -n ${NUM_LINES}"
+            fi
+        ;;
+
+        "status")
+            local result
+            DEBUG "status"
+            output_repo_url_link .
+            eval "git status"
+        ;;
+
+        "url")
+            local result
+            DEBUG "url"
+            output_repo_url_link .
+        ;;
+
+        ""|"branches"|"branch"|"current_branch")
+            DEBUG "branches"
+            if [[ -z "${SEARCH}" ]];then
+                if [[ -z "${NUM_LINES}" ]]; then
+                    show_branches
+                else
+                    show_branches | head -n ${NUM_LINES}
+                fi
+            else
+                if [[ -z "${NUM_LINES}" ]]; then
+                    show_branches | grep -i "${SEARCH}"
+                else
+                    show_branches | grep -i "${SEARCH}" | head -n ${NUM_LINES}
+                fi
+            fi
+            if [[ "${COMMAND}" == "branch" ]];then
+                # We quite after the first loop
+                exit 0
+            fi
+        ;;
+
+        "review")
+            DEBUG "review"
+            ${MY_DIR}/review.sh
+        ;;
+
+        "remote")
+            DEBUG "remote"
+            git remote -vv | head -n1
+        ;;
+
+        *)
+            ERROR "exit perform_command()"
+            exit 1
+        ;;
+
+    esac
+
+    popd > /dev/null 2>&1
+    if [ "${LINE_SKIP}" == "true" ]; then
+        echo ""
+    fi
+}
+
+decode_params "$@"
+if [ "${COMMAND}" == "" ]; then
+    usage
+    exit 1
+fi
+find_repos
+
+for repo in "${REPOS[@]}"
+do
+    result=""
+    DEBUG "${repo}" grep -i "${DIRECTORY_PATTERN}"
+    if [[ "${DIRECTORY_PATTERN}" != "" ]];then
+        result=$(echo ${repo} | grep -i "${DIRECTORY_PATTERN}")
+        DEBUG result:[${result}]
+        if [ "${result}" == "" ]; then
+            DEBUG result:[${result}]:here1
+            continue
+        fi
+    fi
+
+    INFO "${repo}"
+    perform_command "${repo}"
+done
+
+
+#set +x
